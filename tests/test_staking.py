@@ -51,12 +51,20 @@ def test_user_deposit(staking_contract, mock_usdc, accounts):
     # 存款质押
     tx = staking_contract.deposit(amount, {'from': user})
     
-    assert staking_contract.stakedBalances(user) == amount
+    staking_id = tx.events['Deposited']['stakingId']
+    assert staking_id == 1
+    
+    # 验证存入的数据
+    stake_info = staking_contract.stakings(staking_id)
+    assert stake_info['user'] == user.address
+    assert stake_info['amount'] == amount
+    assert stake_info['withdrawn'] == False
+    
     assert staking_contract.totalStaked() == amount
     
     # 检查事件
     assert 'Deposited' in tx.events
-    assert tx.events['Deposited']['user'] == user.address
+    assert tx.events['Deposited']['stakingId'] == staking_id
     assert tx.events['Deposited']['amount'] == amount
 
 def test_min_deposit_limit(staking_contract, mock_usdc, accounts):
@@ -76,34 +84,46 @@ def test_user_withdraw(staking_contract, mock_usdc, accounts):
     user = accounts[1]
     initial_amount = 1000 * 10**6
     withdraw_amount = 250 * 10**6
-    
+
     # 初始化账户并存款
     mock_usdc.transfer(user, initial_amount, {'from': accounts[0]})
     mock_usdc.approve(staking_contract.address, initial_amount, {'from': user})
-    staking_contract.deposit(initial_amount, {'from': user})
-    
+    tx_dep = staking_contract.deposit(initial_amount, {'from': user})
+    staking_id = tx_dep.events['Deposited']['stakingId']
+
     # 提取質押
-    tx = staking_contract.withdraw(withdraw_amount, {'from': user})
-    
-    assert staking_contract.stakedBalances(user) == initial_amount - withdraw_amount
-    assert staking_contract.totalStaked() == initial_amount - withdraw_amount
+    tx = staking_contract.withdraw(staking_id, {'from': user})
+
+    # 验证状态
+    stake_info = staking_contract.stakings(staking_id)
+    assert stake_info['withdrawn'] == True
+    assert staking_contract.totalStaked() == 0
     
     # 检查事件
     assert 'Withdrawn' in tx.events
     assert tx.events['Withdrawn']['user'] == user.address
-    assert tx.events['Withdrawn']['amount'] == withdraw_amount
+    assert tx.events['Withdrawn']['stakingId'] == staking_id
+    assert tx.events['Withdrawn']['amount'] == initial_amount
 
-def test_withdraw_insufficient_balance(staking_contract, mock_usdc, accounts):
-    user = accounts[1]
+    # 初始化并存款
     amount = 500 * 10**6
-    
     mock_usdc.transfer(user, amount, {'from': accounts[0]})
     mock_usdc.approve(staking_contract.address, amount, {'from': user})
-    staking_contract.deposit(amount, {'from': user})
+    tx_dep = staking_contract.deposit(amount, {'from': user})
+    staking_id = tx_dep.events['Deposited']['stakingId']
     
-    # 尝试提取超过余额的金额
+    # 尝试再次提取同一笔质押
+    staking_contract.withdraw(staking_id, {'from': user})
     with reverts():
-        staking_contract.withdraw(amount + 1, {'from': user})
+        staking_contract.withdraw(staking_id, {'from': user})
+    
+    # 尝试提取不存在的 ID
+    with reverts():
+        staking_contract.withdraw(999, {'from': user})
+    
+    # 尝试提取别人的质押
+    with reverts():
+        staking_contract.withdraw(staking_id, {'from': accounts[2]})
 
 def test_change_owner(staking_contract, accounts):
     new_owner = accounts[1]

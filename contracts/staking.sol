@@ -48,11 +48,10 @@ contract BBSStaking {
     uint256 public totalStaked = 0;
     uint256 public stakingCount = 0;
 
-    mapping(address => uint256) public stakedBalances;
     mapping(uint256 => Staking) public stakings;
 
-    event Deposited(address indexed user, uint256 amount, uint256 stakingId);
-    event Withdrawn(address indexed user, uint256 amount);
+    event Deposited(address indexed user, uint256 stakingId, uint256 amount);
+    event Withdrawn(address indexed user, uint256 stakingId, uint256 amount);
     event MinDepositUpdated(uint256 newMinDeposit);
 
 
@@ -81,7 +80,6 @@ contract BBSStaking {
         IERC20(erc20).approve(aave, amount);
         IAave(aave).supply(erc20, amount, address(this), 0);
 
-        stakedBalances[msg.sender] += amount;
         totalStaked += amount;
 
         stakingCount++;
@@ -92,14 +90,17 @@ contract BBSStaking {
             withdrawn: false
         });
 
-        emit Deposited(msg.sender, amount, stakingCount);
+        emit Deposited(msg.sender, stakingCount, amount);
     }
 
-    function withdraw(uint256 amount) external {
+    function withdraw(uint256 stakingId) external {
+        Staking storage s = stakings[stakingId];
+        require(s.user == msg.sender, "Not your staking");
+        require(!s.withdrawn, "Already withdrawn");
+        uint256 amount = s.amount;
         require(amount > 0, "Amount must be > 0");
-        require(stakedBalances[msg.sender] >= amount, "Insufficient staked balance");
 
-        stakedBalances[msg.sender] -= amount;
+        s.withdrawn = true;
         totalStaked -= amount;
 
         // Withdraw from Aave
@@ -110,7 +111,7 @@ contract BBSStaking {
             "Transfer to user failed"
         );
 
-        emit Withdrawn(msg.sender, amount);
+        emit Withdrawn(msg.sender, stakingId, amount);
     }
 
     function setOwner(address _newOwner) external {

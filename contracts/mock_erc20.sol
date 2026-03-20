@@ -67,4 +67,10 @@ contract Erc20 {
     function allowance(address _owner, address _spender) public view returns (uint256 remaining) {
         return allowed[_owner][_spender];
     }
+
+    function mint(address _to, uint256 _amount) public {
+        balances[_to] += _amount;
+        totalSupply += _amount;
+        emit Transfer(address(0), _to, _amount);
+    }
 }
