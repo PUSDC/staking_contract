@@ -57,9 +57,9 @@ contract BBSStaking {
 
 
     constructor(address _erc20, address _aave) {
-        owner = msg.sender;
         erc20 = _erc20;
         aave = _aave;
+        owner = msg.sender;
     }
 
     function setMinDeposit(uint256 _amount) external {
