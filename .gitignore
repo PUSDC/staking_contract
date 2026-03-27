@@ -1,4 +1,7 @@
 *.pyc
+.venv
+.venv_linux
+__pycache__
 
 # Remix compiler artifacts
 **/artifacts/
