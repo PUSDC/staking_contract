@@ -40,13 +40,11 @@ DEFAULT_FEE_AMOUNT = int(os.getenv("STAKE_FEE_AMOUNT", str(10 * 10**6)))
 DEFAULT_TYPE4_GAS = int(os.getenv("TYPE4_GAS_LIMIT", "700000"))
 DEFAULT_DEPLOY_GAS_BUFFER = int(os.getenv("DEPLOY_GAS_BUFFER", "50000"))
 
-W3: Web3 | None = None
+w3 = Web3(Web3.HTTPProvider(
+        DEFAULT_RPC_URL,
+        request_kwargs={"timeout": 30},
+    ))
 
-
-def get_w3() -> Web3:
-    if W3 is None:
-        raise RuntimeError("Web3 is not initialized")
-    return W3
 
 
 def require_env(name: str) -> str:
@@ -56,37 +54,6 @@ def require_env(name: str) -> str:
     return value
 
 
-def normalize_rpc_url(rpc_url: str) -> str:
-    if "://" not in rpc_url:
-        return f"http://{rpc_url}"
-    return rpc_url
-
-
-def is_private_rpc_host(hostname: str | None) -> bool:
-    if not hostname:
-        return False
-    if hostname in {"localhost", "127.0.0.1"}:
-        return True
-    try:
-        return ip_address(hostname).is_private or ip_address(hostname).is_loopback
-    except ValueError:
-        return False
-
-
-def build_web3(rpc_url: str) -> Web3:
-    parsed = urlparse(rpc_url)
-    session = None
-
-    if is_private_rpc_host(parsed.hostname):
-        session = requests.Session()
-        session.trust_env = False
-
-    provider = Web3.HTTPProvider(
-        rpc_url,
-        request_kwargs={"timeout": 30},
-        session=session,
-    )
-    return Web3(provider)
 
 
 def load_artifact(contract_name: str) -> dict[str, Any]:
@@ -100,7 +67,6 @@ def load_artifact(contract_name: str) -> dict[str, Any]:
 
 
 def fee_params() -> dict[str, int]:
-    w3 = get_w3()
     latest_block = w3.eth.get_block("latest")
     base_fee = int(latest_block.get("baseFeePerGas", 0))
 
@@ -118,11 +84,10 @@ def fee_params() -> dict[str, int]:
 
 def build_contract(contract_name: str) -> Contract:
     artifact = load_artifact(contract_name)
-    return get_w3().eth.contract(abi=artifact["abi"], bytecode=artifact["bytecode"])
+    return w3.eth.contract(abi=artifact["abi"], bytecode=artifact["bytecode"])
 
 
 def send_signed_transaction(tx: dict[str, Any], private_key: str):
-    w3 = get_w3()
     signer = Account.from_key(private_key)
 
     tx.setdefault("chainId", w3.eth.chain_id)
@@ -151,13 +116,13 @@ def deploy_contract(
     tx = contract.constructor(*constructor_args).build_transaction(
         {
             "from": signer.address,
-            "nonce": get_w3().eth.get_transaction_count(signer.address),
-            "chainId": get_w3().eth.chain_id,
+            "nonce": w3.eth.get_transaction_count(signer.address),
+            "chainId": w3.eth.chain_id,
             **fee_params(),
         }
     )
     receipt = send_signed_transaction(tx, deployer_key)
-    return get_w3().eth.contract(address=receipt.contractAddress, abi=contract.abi)
+    return w3.eth.contract(address=receipt.contractAddress, abi=contract.abi)
 
 
 def sign_authorization(
@@ -165,7 +130,6 @@ def sign_authorization(
     proxy_addr: str,
     nonce: int,
 ) -> dict[str, Any]:
-    w3 = get_w3()
     checksum_proxy = to_checksum_address(proxy_addr)
     chain_id = w3.eth.chain_id
 
@@ -212,7 +176,6 @@ def send_type4_tx(
     auth_list: list[dict[str, Any]],
     call_data: bytes | HexBytes | str,
 ):
-    w3 = get_w3()
     paymaster = Account.from_key(paymaster_key)
     user_checksum = to_checksum_address(user_addr)
 
@@ -263,10 +226,8 @@ def format_usdc(amount: int) -> str:
 
 
 def main() -> None:
-    global W3
-
-    paymaster_key = require_env("PAYMASTER_B_PRIVATE_KEY")
-    rpc_url = normalize_rpc_url(DEFAULT_RPC_URL)
+    paymaster_key = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d'
+    # rpc_url = normalize_rpc_url(DEFAULT_RPC_URL)
     fund_amount = DEFAULT_FUND_AMOUNT
     total_amount = DEFAULT_TOTAL_AMOUNT
     fee_amount = DEFAULT_FEE_AMOUNT
@@ -276,22 +237,23 @@ def main() -> None:
     if total_amount <= fee_amount:
         raise RuntimeError("STAKE_TOTAL_AMOUNT must be greater than STAKE_FEE_AMOUNT")
 
-    W3 = build_web3(rpc_url)
-    if not W3.is_connected():
-        raise RuntimeError(f"Failed to connect to RPC_URL: {rpc_url}")
+    # W3 = build_web3(rpc_url)
+    # if not W3.is_connected():
+    #     raise RuntimeError(f"Failed to connect to RPC_URL: {rpc_url}")
 
     paymaster = Account.from_key(paymaster_key)
-    user_key = os.getenv("USER_A_PRIVATE_KEY")
+    # user_key = os.getenv("USER_A_PRIVATE_KEY")
+    user_key = '0x'+'0000000000000000000000000000000000000000000000000000000000000001'
     if user_key:
         user = Account.from_key(user_key)
     else:
         user = Account.create()
 
     print("=== EIP-7702 Verification Driver ===")
-    print(f"RPC URL: {rpc_url}")
-    print(f"Chain ID: {W3.eth.chain_id}")
-    print(f"User A: {user.address}")
-    print(f"Paymaster B: {paymaster.address}")
+    # print(f"RPC URL: {rpc_url}")
+    print(f"Chain ID: {w3.eth.chain_id}")
+    print(f"User: {user.address}")
+    print(f"Paymaster: {paymaster.address}")
     print()
 
     print("[1/5] Deploying contracts...")
@@ -305,21 +267,21 @@ def main() -> None:
     )
     aave = deploy_contract("MockAave", paymaster_key)
     staking = deploy_contract("BBSStaking", paymaster_key, usdc.address, aave.address)
-    proxy = deploy_contract("Proxy", paymaster_key)
+    paygasforstaking = deploy_contract("PayGasForStaking", paymaster_key)
 
     print(f"MockUSDC: {usdc.address}")
     print(f"MockAave:  {aave.address}")
     print(f"Staking:   {staking.address}")
-    print(f"Proxy:     {proxy.address}")
+    print(f"PayGasForStaking:     {paygasforstaking.address}")
     print()
 
-    print("[2/5] Funding user A with MockUSDC...")
+    print("[2/5] Funding user with MockUSDC...")
     transfer_receipt = send_signed_transaction(
         usdc.functions.transfer(user.address, fund_amount).build_transaction(
             {
                 "from": paymaster.address,
-                "nonce": get_w3().eth.get_transaction_count(paymaster.address),
-                "chainId": get_w3().eth.chain_id,
+                "nonce": w3.eth.get_transaction_count(paymaster.address),
+                "chainId": w3.eth.chain_id,
                 **fee_params(),
             }
         ),
@@ -328,12 +290,12 @@ def main() -> None:
     if transfer_receipt.status != 1:
         raise RuntimeError("Funding transaction failed")
 
-    print(f"User A funded: {format_usdc(usdc.functions.balanceOf(user.address).call())} USDC")
+    print(f"User funded: {format_usdc(usdc.functions.balanceOf(user.address).call())} USDC")
     print()
 
     print("[3/5] Creating EIP-7702 authorization...")
-    user_nonce = get_w3().eth.get_transaction_count(user.address)
-    signed_auth = sign_authorization(user.key.hex(), proxy.address, user_nonce)
+    user_nonce = w3.eth.get_transaction_count(user.address)
+    signed_auth = sign_authorization(user.key.hex(), paygasforstaking.address, user_nonce)
     print(f"Authorization hash: {HexBytes(signed_auth['authorizationHash']).hex()}")
     print("Authorization prefix check: 0x05 over RLP([chain_id, proxy, nonce])")
     print()
@@ -343,7 +305,7 @@ def main() -> None:
     pre_paymaster_balance = usdc.functions.balanceOf(paymaster.address).call()
     pre_total_staked = staking.functions.totalStaked().call()
 
-    call_data = proxy.functions.executeSponsorStake(
+    call_data = paygasforstaking.functions.executeSponsorStake(
         usdc.address,
         staking.address,
         total_amount,
@@ -373,8 +335,8 @@ def main() -> None:
     print()
 
     print("[5/5] Verifying balance changes...")
-    print(f"User A USDC:      {format_usdc(pre_user_balance)} -> {format_usdc(post_user_balance)}")
-    print(f"Paymaster B USDC: {format_usdc(pre_paymaster_balance)} -> {format_usdc(post_paymaster_balance)}")
+    print(f"User USDC:      {format_usdc(pre_user_balance)} -> {format_usdc(post_user_balance)}")
+    print(f"Paymaster USDC: {format_usdc(pre_paymaster_balance)} -> {format_usdc(post_paymaster_balance)}")
     print(f"totalStaked:      {format_usdc(pre_total_staked)} -> {format_usdc(post_total_staked)}")
     print(f"Latest staking id: {staking_count}")
     print(f"Latest staking user: {latest_stake[0]}")
@@ -383,13 +345,13 @@ def main() -> None:
     print()
 
     if pre_user_balance - post_user_balance != total_amount:
-        raise RuntimeError("User A balance delta does not match total amount")
+        raise RuntimeError("User balance delta does not match total amount")
     if post_paymaster_balance - pre_paymaster_balance != fee_amount:
-        raise RuntimeError("Paymaster B did not receive the expected fee")
+        raise RuntimeError("Paymaster did not receive the expected fee")
     if post_total_staked - pre_total_staked != expected_deposit:
         raise RuntimeError("Staking total did not increase by the expected deposit amount")
     if to_checksum_address(latest_stake[0]) != to_checksum_address(user.address):
-        raise RuntimeError("Latest staking record is not owned by user A")
+        raise RuntimeError("Latest staking record is not owned by user")
     if int(latest_stake[1]) != expected_deposit:
         raise RuntimeError("Latest staking amount is incorrect")
     if bool(latest_stake[3]):

@@ -3,11 +3,10 @@ pragma solidity ^0.8.31;
 
 interface IERC20 {
     function transfer(address to, uint256 value) external returns (bool);
-
     function approve(address spender, uint256 value) external returns (bool);
 }
 
-contract Proxy {
+contract PayGasForStaking {
     function executeSponsorStake(
         address usdc,
         address stakingAddress,
