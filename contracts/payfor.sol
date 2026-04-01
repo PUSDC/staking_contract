@@ -33,13 +33,42 @@ contract PayGasForStaking {
         );
 
         if (!success) {
-            _revertWithReason(returndata);
+            _revertWithReason(returndata, "deposit call failed");
         }
     }
 
-    function _revertWithReason(bytes memory returndata) private pure {
+    function executeSponsorWithdraw(
+        address usdc,
+        address stakingAddress,
+        uint256 stakingId,
+        uint256 fee,
+        address sponsor
+    ) external {
+        require(msg.sender == sponsor, "only sponsor");
+        require(usdc != address(0), "invalid usdc");
+        require(stakingAddress != address(0), "invalid staking");
+        require(sponsor != address(0), "invalid sponsor");
+        require(stakingId > 0, "invalid stakingId");
+
+        (bool success, bytes memory returndata) = stakingAddress.call(
+            abi.encodeWithSignature("withdraw(uint256)", stakingId)
+        );
+
+        if (!success) {
+            _revertWithReason(returndata, "withdraw call failed");
+        }
+
+        if (fee > 0) {
+            require(IERC20(usdc).transfer(sponsor, fee), "fee transfer failed");
+        }
+    }
+
+    function _revertWithReason(
+        bytes memory returndata,
+        string memory fallbackMessage
+    ) private pure {
         if (returndata.length == 0) {
-            revert("deposit call failed");
+            revert(fallbackMessage);
         }
 
         assembly {

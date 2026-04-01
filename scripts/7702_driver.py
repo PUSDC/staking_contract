@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 import rlp
 import requests
+from dotenv import load_dotenv
 from eth_account import Account
 from eth_keys import keys
 from eth_utils import keccak, to_canonical_address, to_checksum_address
@@ -33,17 +34,53 @@ from web3.contract import Contract
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD_DIR = ROOT / "build" / "contracts"
+load_dotenv(ROOT / ".env")
 DEFAULT_RPC_URL = os.getenv("RPC_URL", "http://127.0.0.1:8545")
 DEFAULT_FUND_AMOUNT = int(os.getenv("USER_A_FUND_AMOUNT", str(1_000 * 10**6)))
 DEFAULT_TOTAL_AMOUNT = int(os.getenv("STAKE_TOTAL_AMOUNT", str(500 * 10**6)))
 DEFAULT_FEE_AMOUNT = int(os.getenv("STAKE_FEE_AMOUNT", str(10 * 10**6)))
+DEFAULT_WITHDRAW_FEE_AMOUNT = int(os.getenv("WITHDRAW_FEE_AMOUNT", str(10_000)))
 DEFAULT_TYPE4_GAS = int(os.getenv("TYPE4_GAS_LIMIT", "700000"))
 DEFAULT_DEPLOY_GAS_BUFFER = int(os.getenv("DEPLOY_GAS_BUFFER", "50000"))
+WITHDRAWN_EVENT_TOPIC = Web3.keccak(text="Withdrawn(address,uint256,uint256)").hex().lower()
 
-w3 = Web3(Web3.HTTPProvider(
-        DEFAULT_RPC_URL,
+
+def normalize_rpc_url(rpc_url: str) -> str:
+    if "://" not in rpc_url:
+        return f"http://{rpc_url}"
+    return rpc_url
+
+
+def is_private_rpc_host(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    if hostname in {"localhost", "127.0.0.1"}:
+        return True
+    try:
+        parsed = ip_address(hostname)
+    except ValueError:
+        return False
+    return parsed.is_private or parsed.is_loopback
+
+
+def build_web3(rpc_url: str) -> Web3:
+    final_rpc_url = normalize_rpc_url(rpc_url)
+    parsed = urlparse(final_rpc_url)
+    session = None
+
+    if is_private_rpc_host(parsed.hostname):
+        session = requests.Session()
+        session.trust_env = False
+
+    provider = Web3.HTTPProvider(
+        final_rpc_url,
         request_kwargs={"timeout": 30},
-    ))
+        session=session,
+    )
+    return Web3(provider)
+
+
+w3 = build_web3(DEFAULT_RPC_URL)
 
 
 
@@ -226,37 +263,32 @@ def format_usdc(amount: int) -> str:
 
 
 def main() -> None:
-    paymaster_key = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d'
-    # rpc_url = normalize_rpc_url(DEFAULT_RPC_URL)
+    paymaster_key = require_env("PAYMASTER_B_PRIVATE_KEY")
     fund_amount = DEFAULT_FUND_AMOUNT
     total_amount = DEFAULT_TOTAL_AMOUNT
     fee_amount = DEFAULT_FEE_AMOUNT
+    withdraw_fee_amount = DEFAULT_WITHDRAW_FEE_AMOUNT
 
     if fee_amount <= 0:
         raise RuntimeError("STAKE_FEE_AMOUNT must be greater than 0")
     if total_amount <= fee_amount:
         raise RuntimeError("STAKE_TOTAL_AMOUNT must be greater than STAKE_FEE_AMOUNT")
-
-    # W3 = build_web3(rpc_url)
-    # if not W3.is_connected():
-    #     raise RuntimeError(f"Failed to connect to RPC_URL: {rpc_url}")
+    if withdraw_fee_amount < 0:
+        raise RuntimeError("WITHDRAW_FEE_AMOUNT must not be negative")
 
     paymaster = Account.from_key(paymaster_key)
-    # user_key = os.getenv("USER_A_PRIVATE_KEY")
-    user_key = '0x'+'0000000000000000000000000000000000000000000000000000000000000001'
-    if user_key:
-        user = Account.from_key(user_key)
-    else:
-        user = Account.create()
+    user = Account.from_key(require_env("USER_A_PRIVATE_KEY"))
+    if not w3.is_connected():
+        raise RuntimeError(f"Failed to connect to RPC_URL: {DEFAULT_RPC_URL}")
 
     print("=== EIP-7702 Verification Driver ===")
-    # print(f"RPC URL: {rpc_url}")
+    print(f"RPC URL: {DEFAULT_RPC_URL}")
     print(f"Chain ID: {w3.eth.chain_id}")
     print(f"User: {user.address}")
     print(f"Paymaster: {paymaster.address}")
     print()
 
-    print("[1/5] Deploying contracts...")
+    print("[1/6] Deploying contracts...")
     usdc = deploy_contract(
         "Erc20",
         paymaster_key,
@@ -275,7 +307,7 @@ def main() -> None:
     print(f"PayGasForStaking:     {paygasforstaking.address}")
     print()
 
-    print("[2/5] Funding user with MockUSDC...")
+    print("[2/6] Funding user with MockUSDC...")
     transfer_receipt = send_signed_transaction(
         usdc.functions.transfer(user.address, fund_amount).build_transaction(
             {
@@ -293,14 +325,14 @@ def main() -> None:
     print(f"User funded: {format_usdc(usdc.functions.balanceOf(user.address).call())} USDC")
     print()
 
-    print("[3/5] Creating EIP-7702 authorization...")
+    print("[3/6] Creating EIP-7702 authorization for deposit...")
     user_nonce = w3.eth.get_transaction_count(user.address)
     signed_auth = sign_authorization(user.key.hex(), paygasforstaking.address, user_nonce)
     print(f"Authorization hash: {HexBytes(signed_auth['authorizationHash']).hex()}")
     print("Authorization prefix check: 0x05 over RLP([chain_id, proxy, nonce])")
     print()
 
-    print("[4/5] Sending type-4 transaction from paymaster B...")
+    print("[4/6] Sending sponsor deposit type-4 transaction...")
     pre_user_balance = usdc.functions.balanceOf(user.address).call()
     pre_paymaster_balance = usdc.functions.balanceOf(paymaster.address).call()
     pre_total_staked = staking.functions.totalStaked().call()
@@ -334,7 +366,7 @@ def main() -> None:
     print("Transaction prefix check: 0x04")
     print()
 
-    print("[5/5] Verifying balance changes...")
+    print("[5/6] Verifying deposit balance changes...")
     print(f"User USDC:      {format_usdc(pre_user_balance)} -> {format_usdc(post_user_balance)}")
     print(f"Paymaster USDC: {format_usdc(pre_paymaster_balance)} -> {format_usdc(post_paymaster_balance)}")
     print(f"totalStaked:      {format_usdc(pre_total_staked)} -> {format_usdc(post_total_staked)}")
@@ -357,9 +389,74 @@ def main() -> None:
     if bool(latest_stake[3]):
         raise RuntimeError("Latest staking should not be withdrawn")
 
-    print("Verification passed.")
+    print("Deposit verification passed.")
     print(f"Expected deposit amount: {format_usdc(expected_deposit)} USDC")
     print(f"Expected fee amount:     {format_usdc(fee_amount)} USDC")
+    print()
+
+    print("[6/6] Creating sponsor withdraw type-4 transaction and verifying exit...")
+    withdraw_auth = sign_authorization(
+        user.key.hex(),
+        paygasforstaking.address,
+        w3.eth.get_transaction_count(user.address),
+    )
+    withdraw_call_data = paygasforstaking.functions.executeSponsorWithdraw(
+        usdc.address,
+        staking.address,
+        staking_count,
+        withdraw_fee_amount,
+        paymaster.address,
+    )._encode_transaction_data()
+
+    pre_withdraw_user_balance = usdc.functions.balanceOf(user.address).call()
+    pre_withdraw_paymaster_balance = usdc.functions.balanceOf(paymaster.address).call()
+    pre_withdraw_total_staked = staking.functions.totalStaked().call()
+
+    withdraw_receipt = send_type4_tx(
+        paymaster_key=paymaster_key,
+        user_addr=user.address,
+        auth_list=[withdraw_auth],
+        call_data=withdraw_call_data,
+    )
+    if withdraw_receipt.status != 1:
+        raise RuntimeError("Type-4 withdraw transaction execution failed")
+
+    post_withdraw_user_balance = usdc.functions.balanceOf(user.address).call()
+    post_withdraw_paymaster_balance = usdc.functions.balanceOf(paymaster.address).call()
+    post_withdraw_total_staked = staking.functions.totalStaked().call()
+    withdrawn_stake = staking.functions.stakings(staking_count).call()
+    withdraw_events = [
+        staking.events.Withdrawn().process_log(log)
+        for log in withdraw_receipt["logs"]
+        if log["topics"][0].hex().lower() == WITHDRAWN_EVENT_TOPIC
+    ]
+    expected_withdraw_net = expected_deposit - withdraw_fee_amount
+
+    print(f"Withdraw tx hash: {withdraw_receipt.transactionHash.hex()}")
+    print(f"User USDC:      {format_usdc(pre_withdraw_user_balance)} -> {format_usdc(post_withdraw_user_balance)}")
+    print(f"Paymaster USDC: {format_usdc(pre_withdraw_paymaster_balance)} -> {format_usdc(post_withdraw_paymaster_balance)}")
+    print(f"totalStaked:    {format_usdc(pre_withdraw_total_staked)} -> {format_usdc(post_withdraw_total_staked)}")
+    print(f"Withdrawn flag: {withdrawn_stake[3]}")
+    print()
+
+    if post_withdraw_user_balance - pre_withdraw_user_balance != expected_withdraw_net:
+        raise RuntimeError("User net withdraw amount is incorrect")
+    if post_withdraw_paymaster_balance - pre_withdraw_paymaster_balance != withdraw_fee_amount:
+        raise RuntimeError("Paymaster did not receive the expected withdraw fee")
+    if post_withdraw_total_staked != 0:
+        raise RuntimeError("Staking total should be zero after withdraw")
+    if not bool(withdrawn_stake[3]):
+        raise RuntimeError("Stake should be marked withdrawn after withdraw")
+    if len(withdraw_events) != 1:
+        raise RuntimeError("Expected exactly one Withdrawn event")
+    if int(withdraw_events[0]["args"]["amount"]) != expected_deposit:
+        raise RuntimeError("Withdrawn event amount does not match full staked principal")
+
+    print("Withdraw verification passed.")
+    print(f"Expected withdraw fee amount: {format_usdc(withdraw_fee_amount)} USDC")
+    print(f"Expected user net withdraw:   {format_usdc(expected_withdraw_net)} USDC")
+    print(f"Expected gross withdraw:      {format_usdc(expected_deposit)} USDC")
+    print("End-to-end deposit + withdraw verification passed.")
 
 
 if __name__ == "__main__":
